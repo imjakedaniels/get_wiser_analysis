@@ -1,0 +1,527 @@
+---
+title: "getwiser"
+author: "Jake"
+date: "08/09/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      dev = "CairoPNG",
+                      dpi = 300)
+```
+
+```{r}
+library(tidyverse) # for manipulating
+library(rtweet) # for scraping tweets
+library(purrr) # for iterating over multiple sources
+library(tidytext) # for text manipulation
+library(ggthemes)
+theme_set(theme_economist())
+``` 
+
+```{r}
+getwiser_tweets <- get_timeline("GetWiser", n=3200)
+getwiser_tweets <- getwiser_tweets %>% mutate_if(is.list, as.character)
+write_csv(getwiser_tweets, "getwiser_tweets.csv")
+```
+
+```{r}
+getwiser_tweets <- read_csv("getwiser_tweets.csv")
+
+getwiser_tweets_subset <- getwiser_tweets %>%
+  select(status_id, created_at, screen_name, text, display_text_width, favorite_count, retweet_count, hashtags, mentions_screen_name)
+```
+
+```{r}
+screen_name_counts <- getwiser_tweets_subset %>%
+  group_by(mentions_screen_name) %>%
+  filter(!str_detect(mentions_screen_name, "^c\\(")) %>%
+  summarize(total_tweets = n(), 
+            total_favs = sum(favorite_count),
+            total_rts = sum(retweet_count))
+
+screen_name_counts %>%
+  mutate(avg_fav_per_tweet = total_favs / total_tweets,
+         avg_rt_per_tweet = total_rts / total_tweets) 
+```
+
+```{r}
+hashtag_counts <- getwiser_tweets_subset %>%
+  group_by(hashtags) %>%
+  filter(!str_detect(hashtags, "^c\\(")) %>%
+  summarize(total_tweets = n(), 
+            total_favs = sum(favorite_count),
+            total_rts = sum(retweet_count))
+
+hashtag_counts %>%
+  mutate(avg_fav_per_tweet = total_favs / total_tweets,
+         avg_rt_per_tweet = total_rts / total_tweets) %>%
+  filter(total_tweets >= 10) %>%
+  arrange(desc(total_tweets))
+```
+
+```{r}
+message_length_counts <- getwiser_tweets_subset %>%
+  mutate(message_length = case_when(
+    display_text_width <= 70 ~ "short",
+    display_text_width > 70 & display_text_width <= 140 ~ "medium",
+    display_text_width > 140 & display_text_width <= 210 ~ "long",
+    display_text_width > 210 ~ "very_long"
+  )) %>%
+  group_by(message_length) %>%
+   summarize(total_tweets = n(), 
+            total_favs = sum(favorite_count),
+            total_rts = sum(retweet_count))
+
+message_length_counts %>%
+  mutate(avg_fav_per_tweet = total_favs / total_tweets,
+         avg_rt_per_tweet = total_rts / total_tweets,
+         interaction_score = avg_fav_per_tweet * (avg_rt_per_tweet*3))
+```
+
+```{r}
+getwiser_tweets_subset %>%
+  mutate(interaction_score = favorite_count * (retweet_count*3)) %>%
+  arrange(desc(interaction_score))
+```
+
+```{r}
+library(lubridate)
+hourly_counts <- getwiser_tweets_subset %>%
+  mutate(hour = hour(created_at)) %>%
+  group_by(hour) %>%
+  summarize(total_tweets = n(), 
+            total_favs = sum(favorite_count),
+            total_rts = sum(retweet_count))
+
+hourly_df <- hourly_counts %>%
+  mutate(avg_fav_per_tweet = total_favs / total_tweets,
+         avg_rt_per_tweet = total_rts / total_tweets,
+         interaction_score = avg_fav_per_tweet * (avg_rt_per_tweet*3)) 
+
+upper_limit <- hourly_df %>% 
+  summarize(label = max(interaction_score) + 100)
+
+ggplot(hourly_df, aes(x = hour, y = interaction_score, fill = interaction_score)) +
+  geom_line() +
+  geom_point(shape = 21, size = 3) +
+  scale_x_continuous(breaks = 0:23, labels = 0:23) +
+  expand_limits(y=0:upper_limit$label) +
+  labs(title = "Average interaction score by time of day",
+       subtitle = "interaction score = avg_fav_per_tweet * (avg_rt_per_tweet * 3)") +
+  theme(legend.position = "none") +
+  annotate("text", x = 12, y = 750, label = "Noon (Lunch)") +
+annotate("text", x = 18, y = 725, label = "6PM (Commute)")
+```
+
+
+```{r}
+getwiser_tweets_subset %>%
+  mutate(day_of_week = wday(created_at, label = TRUE),
+         interaction_score = favorite_count * (retweet_count*3)) %>%
+  filter(interaction_score > quantile(interaction_score, 0.05),
+         interaction_score < quantile(interaction_score, 0.95)) %>%
+  ggplot(aes(x = interaction_score, y = day_of_week, colour = interaction_score)) +
+  geom_jitter(alpha=1, shape = 15) +
+  coord_flip() +
+  scale_x_continuous(labels = scales::comma_format()) +
+  labs(title = "Interaction scores by day of week ",
+       subtitle = "interaction_scores > 0.95 quartile were removed") +
+  theme(legend.position = "none")
+```
+
+
+
+```{r}
+library(tidytext)
+  
+unwanted_words <- c("t.co", "https", "amp")
+
+getwiser_words <- getwiser_tweets_subset %>%
+  select(text, favorite_count, retweet_count) %>%
+  unnest_tokens(word, text, token = "tweets") %>%
+  anti_join(stop_words, by= "word") %>%
+  filter(!word %in% unwanted_words) %>%
+  filter(str_detect(word, "[a-z]")) %>%
+  filter(!str_detect(word, "^@")) 
+
+getwiser_words %>%
+  count(word, sort = T)  %>%
+  mutate(word = fct_reorder(word,n)) %>%
+  head(20) %>%
+  ggplot(aes(x = word,y = n, fill = "red")) +
+  geom_col() + 
+  coord_flip() +
+    labs(title = "Most Frequent Words",
+         x="",
+         y= "Count") +
+   theme(axis.text.y = element_text(margin=margin(-20,0,0,0)),
+        legend.position = "none") 
+```
+
+```{r}
+getwiser_word_counts <- getwiser_words %>%
+  group_by(word) %>%
+  summarize(total_tweets = n(), 
+            total_favs = sum(favorite_count),
+            total_rts = sum(retweet_count))
+
+getwiser_word_counts_df <- getwiser_word_counts %>%
+  mutate(avg_fav_per_tweet = total_favs / total_tweets,
+         avg_rt_per_tweet = total_rts / total_tweets,
+         interaction_score = avg_fav_per_tweet * (avg_rt_per_tweet*3)) %>%
+  filter(total_tweets > 10) %>% # must occur in 10 tweets
+  arrange(desc(interaction_score)) %>%
+  head(20)
+
+getwiser_word_counts_df %>%
+  mutate(word = fct_reorder(word, interaction_score)) %>%
+  ggplot(aes(x = word, y = interaction_score, fill = interaction_score)) +
+  geom_col() + 
+  coord_flip() +
+    labs(title = "Words with the highest interaction score",
+         subtitle = "Must appear at least 10 times",
+         x="",
+         y= "Interaction Score") +
+  scale_y_continuous(labels = scales::comma_format()) +
+  
+  theme(legend.position = "none") 
+```
+
+```{r}
+getwiser_tweets_subset %>%
+  mutate(interaction_score = favorite_count * (retweet_count*3)) %>%
+  arrange(desc(interaction_score)) %>%
+  DT::datatable(options = list(
+    columnDefs = list(list(className = 'dt-left', targets = 0)),
+    dom = 't',
+    ordering = FALSE
+  ))
+```
+
+
+```{r}
+getwiser_word_tokens <- getwiser_tweets_subset %>%
+  transmute(post_id = row_number(), text, favorite_count, retweet_count) %>%
+  unnest_tokens(word, text, token = "tweets") %>%
+  filter(!str_detect(word, "^@")) %>%
+  anti_join(stop_words, by= "word") %>%
+  add_count(word) %>% 
+  filter(!word %in% unwanted_words)
+
+library(widyr)
+getwiser_word_tokens %>%
+  filter(n > 10) %>%
+  pairwise_cor(word, post_id, sort=T) %>%
+  filter(item1 %in% c("head", "voice", "science", "age", "love", "fear")) %>%
+  group_by(item1) %>%
+  top_n(6) %>%
+  ungroup() %>%
+  mutate(item2 = reorder(item2, correlation)) %>%
+  ggplot(aes(x = item2, y =correlation, fill = "red")) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ item1, scales = "free") +
+  coord_flip() +
+  labs(title = "Related words calculated with pairwise correlations",
+       x="",
+       y = "Correlation") +
+  theme(legend.position = "none")
+```
+
+```{r}
+getwiser_tweet_tokens <- getwiser_tweets_subset %>%
+  transmute(post_id = row_number(), text, favorite_count, retweet_count) %>%
+  mutate(text = str_extract(text, '".*"')) %>% # only the quotes
+  filter(!is.na(text)) %>%
+  unnest_tokens(word, text, token = "tweets") %>%
+  anti_join(stop_words, by= "word") %>%
+  filter(!word %in% unwanted_words & 
+           !str_detect(word, "^@") & 
+           !str_detect(word, "[:punct:]") & 
+           !str_detect(word, "^@") &
+           str_detect(word, "[a-z]")) %>%
+  add_count(word)
+
+top_word_cors <- getwiser_tweet_tokens %>%
+  filter(n > 10) %>%
+  select(post_id, word) %>%
+  pairwise_cor(word, post_id, sort=T) %>%
+  head(200)
+
+library(ggraph)
+library(igraph)
+
+set.seed(2018)
+
+top_word_cors %>%
+  filter(correlation > .25) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr")+ 
+  geom_edge_link() + 
+  geom_node_point(color = "lightblue", size = 5, alpha = 0.5) +
+  geom_node_text(aes(label = name), repel = T) +
+  theme_void()
+```
+
+```{r}
+# adding another dimension
+word_scores <- getwiser_tweet_tokens %>%
+  filter(n > 10) %>%
+  group_by(word) %>%
+  summarize(total_tweets = n(), 
+            total_favs = sum(favorite_count),
+            total_rts = sum(retweet_count)) %>%
+   mutate(avg_fav_per_tweet = total_favs / total_tweets,
+         avg_rt_per_tweet = total_rts / total_tweets,
+         interaction_score = avg_fav_per_tweet * (avg_rt_per_tweet*3))
+
+vertices <- word_scores %>%
+  filter(word %in% top_word_cors$item1 | word %in% top_word_cors$item2)
+
+# average claps earned
+top_word_cors %>%
+  graph_from_data_frame(vertices = vertices) %>%
+  ggraph(layout = "fr") +
+  geom_edge_link() + 
+  geom_node_point(aes(color = interaction_score), size = 3) +
+  geom_node_text(aes(label = name), size = 3, repel = T) +  
+  theme_void() +
+  labs(color = "Effectiveness", 
+       size = "Frequency"
+       ) +
+  scale_color_gradient2(low = "blue",
+                        high = "red",
+                        midpoint = mean(vertices$interaction_score))
+```
+
+### Clap-Generating Networks by Volume
+
+How about another dimension? The size of the circles now reflect the volume of that word.
+
+```{r}
+set.seed(1234)
+top_word_cors %>%
+  filter(correlation > .05) %>%
+  graph_from_data_frame(vertices = vertices) %>%
+  ggraph(layout = "fr") +
+  geom_edge_link() + 
+  geom_node_point(aes(size = total_tweets * 1.5)) +
+  geom_node_point(aes(size = total_tweets, color = interaction_score)) +
+  geom_node_text(aes(label = name), size = 3, repel = T) +
+  theme_void() +
+  labs(color = "Interaction Score", 
+       size = "Frequency",
+       title = "@GetWiser Quotes Word Network \nCluster size and interaction") +
+  scale_color_gradient2(low = "blue",
+                        high = "red",
+                        midpoint = mean(vertices$interaction_score))
+```
+
+```{r}
+post_word_matrix <- getwiser_tweet_tokens %>%
+  distinct(post_id, word) %>%
+  cast_sparse(post_id, word)
+
+library(topicmodels) # for LDA
+
+set.seed(1234)
+
+k <- 8 #number of topics
+
+lda <- LDA(post_word_matrix, k = k, method = "GIBBS", control = list(seed = 1234))
+
+theme_lyrics <- function(aticks = element_blank(),
+                         pgminor = element_blank(),
+                         lt = element_blank(),
+                         lp = "none") {
+  theme(plot.title = element_text(hjust = 0.5), #center the title
+        axis.ticks = aticks, #set axis ticks to on or off
+        panel.grid.minor = pgminor, #turn on or off the minor grid lines
+        legend.title = lt, #turn on or off the legend title
+        legend.position = lp) #turn on or off the legend
+}
+
+#create function that accepts the lda model and num word to display
+top_terms_per_topic <- function(lda_model, num_words) {
+  
+#tidy LDA object to get word, topic, and probability (beta)
+topics_tidy <- tidy(lda_model, matrix = "beta")
+  
+word_chart <- function(data, input, title) {
+    data %>%
+      #set y = 1 to just plot one variable and use word as the label
+      ggplot(aes(as.factor(row), 1, label = input, fill = factor(topic) )) +
+      #you want the words, not the points
+      geom_point(color = "transparent") +
+      #make sure the labels don't overlap
+      ggrepel::geom_label_repel(colour="white",
+                                nudge_x = .2,  
+                                direction = "y",
+                                box.padding = 0.2,
+                                segment.color = "transparent",
+                                size = 4) +
+    
+      facet_grid(~topic) +
+      theme_lyrics() +
+      theme(axis.text.y = element_blank(), 
+            axis.text.x = element_blank(),
+            #axis.title.x = element_text(size = 9),
+            panel.grid = element_blank(), panel.background = element_blank(),
+            panel.border = element_rect("lightgray", fill = NA),
+            strip.text.x = element_text(size = 9)) +
+      labs(x = NULL, y = NULL, title = title) +
+      #xlab(NULL) + ylab(NULL) +
+      #ggtitle(title) +
+      coord_flip()
+  }
+
+top_terms <- topics_tidy %>%
+  group_by(topic) %>%
+  arrange(topic, desc(beta)) %>%
+  #get the top num_words PER topic
+  slice(seq_len(num_words)) %>%
+  arrange(topic, beta) %>%
+  #row is required for the word_chart() function
+  mutate(row = row_number()) %>%
+  ungroup() %>%
+  #add the word Topic to the topic labels
+  mutate(topic = paste("Topic", topic, sep = " "))
+  #create a title to pass to word_chart
+  title <- paste("Topic Clusters for", k, "Topics")
+  #call the word_chart function you built in prep work
+  word_chart(top_terms, top_terms$term, title)
+} 
+
+#call the function you just built!
+top_terms_per_topic(lda, 5)
+
+tidy(lda, matrix = "beta") %>% filter(term == "love") %>% mutate(beta = round(beta,2)) # likeliest to be in topic 3
+```
+
+```{r}
+library(tidyr)
+bing <- get_sentiments("bing")
+
+# top retweet sentiment
+getwiser_tweet_tokens %>%
+  inner_join(bing) %>%
+  count(word, index = post_id, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  inner_join(getwiser_tweets_subset %>%
+  transmute(post_id = row_number(), text, retweet_count, favorite_count), by = c("index" = "post_id")) %>%
+  mutate(sentiment = positive - negative,
+         index = as.character(index)) %>%
+  group_by(index, retweet_count) %>%
+  summarize(tweet_sentiment = sum(sentiment)) %>%
+  mutate(tweet_sentiment = ifelse(tweet_sentiment > 0, 
+                                  "positive", "negative")) %>%
+  ungroup() %>%
+  mutate(index = reorder(index, retweet_count, order = TRUE)) %>%
+  arrange(desc(retweet_count)) %>%
+  head(100) %>%
+  ggplot(aes(x = index, y = retweet_count, fill = tweet_sentiment)) +
+  geom_col() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+# top favorite sentiment
+getwiser_tweet_tokens %>%
+  inner_join(bing) %>%
+  count(word, index = post_id, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  inner_join(getwiser_tweets_subset %>%
+  transmute(post_id = row_number(), text, retweet_count, favorite_count), by = c("index" = "post_id")) %>%
+  mutate(sentiment = positive - negative,
+         index = as.character(index)) %>%
+  group_by(index, favorite_count) %>%
+  summarize(tweet_sentiment = sum(sentiment)) %>%
+  mutate(tweet_sentiment = ifelse(tweet_sentiment > 0, 
+                                  "positive", "negative")) %>%
+  ungroup() %>%
+  mutate(index = reorder(index, favorite_count, order = TRUE)) %>%
+  arrange(desc(favorite_count)) %>%
+  head(100) %>%
+  ggplot(aes(x = index, y = favorite_count, fill = tweet_sentiment)) +
+  geom_col() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+```{r}
+install.packages("wordcloud")
+library(wordcloud)
+library(reshape2)
+getwiser_tweet_tokens %>%
+  inner_join(bing) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(colors = c("#F8766D", "#00BFC4"),
+                   max.words = 100)
+```
+
+```{r}
+# I want a data.frame with tweet, topic it loaded on, if it was viral or not, top 3 terms using tf_idf, 
+
+getwiser_tweets_subset %>%
+  unnest_tokens(word, text) %>%
+  count(status_id, word, name = "word_count") %>%
+  add_count(status_id, name = "tweet_count") %>%
+  bind_tf_idf(word, status_id, word_count) %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+  filter(word_count > 2)
+
+
+top_words <- getwiser_tweets_subset %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words, by = "word") %>%
+  filter(str_detect(word, "[a-z]")) %>%
+  count(word, status_id) %>%
+  bind_tf_idf(word, status_id, n) %>%
+  group_by(status_id) %>%
+  arrange(desc(tf_idf)) %>%
+  slice(1:5)
+
+keywords <- top_words %>%
+  summarize(keywords = paste(word, collapse=", "))
+  
+getwiser_keywords <- getwiser_tweets_subset %>%
+  inner_join(keywords, by = "status_id")
+```
+
+```{r}
+topics_tidy <- tidy(lda, matrix = "beta")
+
+top_terms <- topics_tidy %>%
+  group_by(topic) %>%
+  arrange(topic, desc(beta)) %>%
+  #get the top num_words PER topic
+  slice(seq_len(100)) %>%
+  ungroup() %>%
+  #add the word Topic to the topic labels
+  mutate(topic = paste("Topic", topic, sep = " "))
+
+top_terms %>%
+  inner_join(getwiser_tweet_tokens, by = c("term" = "word")) %>%
+  #mutate(post_id = as.character(post_id),
+  #       post_id = fct_reorder(post_id, beta, .desc = TRUE)) %>%
+  group_by(post_id) %>%
+  slice(1:10)
+```
+
+```{r}
+getwiser_tweet_tokens %>%
+  bind_tf_idf(word, post_id, n) %>%
+  group_by(post_id) %>% 
+  top_n(15, tf_idf) %>%
+  ggplot(aes(word, tf_idf, fill = post_id)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~post_id, ncol = 2, scales = "free") +
+  coord_flip() +
+  scale_x_reordered()
+```
+
